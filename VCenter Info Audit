@@ -1,0 +1,169 @@
+    DESCRIPTION
+    This script was created to collect information from vSphere datastores and clusters, required for Compliance 360 audits
+    Functions:
+        1. Collecs information from clusters (Overall data)
+            1.1 HOST INFORMATION:         vCenter, Cluster, Num Hosts, Num VMs
+            1.2 CPU INFORMATION:          CPU Usage Ghz, Total CPU Ghz 
+            1.3 RAM INFORMATION:          RAM Usage GB, Total RAM GB
+            1.4 STORAGE INFORMATION:      Free Storage GB, Used Storage GB, Total Storage GB
+            1.5 PERCENTAGE INFORMATION:   CPU Usage Percent, RAM Usage Percent, Free Storage Percent
+
+        2. Collects information from datastores (Individual data)
+            2.1 Name, CapacityGB, FreeSpaceGB
+
+        3. Combines and exports the data to C:/TEMP/OverviewReport.htm
+    ==========================================================================
+    PREREQUISITES
+        1. Install the required module for PowerShell to run the script
+            1.1 >Install-Module VMware.PowerCLI
+
+        2. (Optional) Automatically accepts the certificate from the server (Already done as part of script)
+            2.2 >Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false 
+
+        3. (Optional) Allows the user to be connected to multiple servers at once (This option will come up the first time you run the script with a prompt)
+            3.3 >Set-PowerCLIConfiguration -DefaultVIServerMode multiple -Confirm:$false 
+
+        4. (Optional) Disables additional PowerShell warning / messages 
+            4.4 >Set-PowerCLIConfiguration -Scope User -ParticipateInCEIP $false
+    ==========================================================================  #>
+
+#The hosts you want to get information from
+$hosts = "", ""
+
+#If no credentials are saved in PowerShell, will have popup to input them, will be used to connet to servers
+if ($Credentials -isnot [PSCredential]) {
+    $Credentials = Get-Credential
+}
+Set-PowerCLIConfiguration -InvalidCertificateAction Ignore
+
+#For each vCenter defined in $hosts
+#Connects to each, gets information using Get-Cluster, Get-Datastore, Get-VM and Get-VMHost
+$output = foreach($vc in $hosts){
+    Write-Host "Getting Cluster Information from $vc"
+    Connect-VIServer -Server $vc -Credential $Credentials | Out-Null
+    Get-Cluster -Server $vc | ForEach-Object -Process {
+        Write-Host "Looking at cluster $($_.Name)" -ForegroundColor Yellow
+        $ds = Get-Datastore -RelatedObject $_ 
+
+        #Used for averages and usage over time
+        $sStat = @{
+            Entity = Get-Cluster -Name $_.Name
+            Stat = 'cpu.usage.average', 'mem.usage.average'
+            Start = (Get-Date).AddDays(-7)
+            # Start = (Get-Date).AddHours(-1)
+            Instance = '*'
+            ErrorAction = 'SilentlyContinue'
+            }
+        $stat = Get-Stat @sStat
+        $esx = Get-VMHost -Location $_
+        $hostthreads = ($esx.extensiondata.hardware.cpuinfo.numcputhreads | Measure-Object -Sum).Sum
+        $cpuTot = ($esx | Measure-Object -Property CpuTotalMhz -Sum).Sum
+        $cpuUse = ($esx | Measure-Object -Property CpuUsageMhz -Sum).Sum
+        $memTot = ($esx | Measure-Object -Property MemoryTotalGB -Sum).Sum
+        $memUse = ($esx | Measure-Object -Property MemoryUsageGB -Sum).Sum
+        $storTot = ($ds  | Measure-Object -Property CapacityGB -Sum).Sum
+        $storFree = ($ds  | Measure-Object -Property FreeSpaceGB -Sum).Sum
+        #$vm = Get-VM -Location $_ | where{$_.PowerState -eq "PoweredOn"}
+        $VM = ($_ | get-vm).count
+        $NumDStores = $ds.count
+
+        $obj = [ordered]@{
+            vCenter = $global:defaultviserver.Name
+            Cluster = $_.Name
+
+            'CPU Usage Ghz' = [math]::Round($cpuUse/1000,2)
+            'Total CPU Ghz' = [math]::Round($cpuTot/1000,2)
+
+
+            'RAM Usage GB' = [math]::Round($memUse,2)
+            'Total RAM GB' = [math]::Round($memTot,2)
+
+
+            'Free Storage GB' = [math]::Round(($ds.FreeSpaceGB | Measure-Object -Sum).Sum,2)
+            'Used Storage GB' = [math]::Round(($ds | %{$_.CapacityGB - $_.FreeSpaceGB} | Measure-Object -Sum).Sum,2)
+            'Total Storage GB' = [math]::Round(($ds.CapacityGB| Measure-Object -Sum).Sum,2)
+
+            'CPU Usage (%)' = "{0:P2}" -f ($cpuUse/$cpuTot)
+            'RAM Usage (%)' = "{0:P2}" -f ($memUse/$memTot)
+            'Used Storage (%)' = "{0:P2}" -f (($storTot - $storFree) / $storTot)
+
+            'Num Hosts' = $_.ExtensionData.Host.Count
+            'Num VMs' = $VM
+            'Num Datastores' = $NumDStores
+            <#
+            'Num VMs' = &{
+                $esxVM = Get-View -Id $_.ExtensionData.Host -Property VM
+                $vm = @()
+                if($esxVM.VM){
+                    $vm = Get-View -Id $esxVM.VM -Property Summary.Config.Template |
+                    where{-not $_.Summary.Config.Template}
+                }
+                $vm.Count
+                }
+            
+
+            #Additional information if required
+            #'CPU 7-day' = "{0:P2}" -f (((($stat | where { $_.MetricId -eq 'cpu.usage.average' }).Value | Measure-Object -Average).Average)/100)
+            #'CPU Free' = "{0:P0}" -f (($cpuTot - $cpuUse)/$cpuTot)
+
+            #'RAM 7-day' = "{0:P2}" -f (((($stat | where { $_.MetricId -eq 'mem.usage.average' }).Value | Measure-Object -Average).Average)/100)
+            #'RAM Free GB' = "{0:P0}" -f (($memTot - $memUse)/$memTot)
+
+            #'vCPU' = ($vm.NumCpu | Measure-Object -Sum).Sum
+            #'pCPU' = ($esx.NumCpu | Sort-Object -Descending | Select -Skip 1 | Measure-Object -Sum).Sum
+            #'vCPU/pCPU' = "{0:P0}" -f (($vm.NumCpu | Measure-Object -Sum).Sum / ($esx.NumCpu | Measure-Object -Sum).Sum)
+            #'vMem' = [math]::Round(($vm.MemoryGB | Measure-Object -Sum).Sum)
+            #'pMem' = [math]::Round(($esx.MemoryTotalGB | Measure-Object -Sum).Sum)
+            #'vMem/pMem' = "{0:P0}" -f (($vm.MemoryGB | Measure-Object -Sum).Sum / ($esx.MemoryTotalGB | Measure-Object -Sum).Sum) #>
+        }
+        New-Object PSObject -Property $obj
+   } | Sort Cluster
+} 
+
+#Gets storage information from datastores on each cluster
+$DataStoreGroup = Get-Cluster -PipelineVariable cluster | Get-DataStore |
+Select @{N='Cluster';E={$cluster.Name}},
+       @{N='Datastore Name';E={$_.Name}},
+       @{N='Total Storage GB';E={[math]::Round($_.CapacityGB,0)}},
+       @{N='Free Storage GB';E={[math]::Round($_.FreeSpaceGB,0)}},
+       @{N='Used Storage (%)';E={ "$([math]::Round(($_.CapacityGB - $_.FreeSpaceGB)/$_.CapacityGB*100,2))%"}},
+       @{n="VMs";e={($_ | get-vm).count}} | Sort Cluster
+
+       #@{N='vCenter';E = $global:defaultviserver.Name} #not working
+
+
+#Sets the formatting of the .htm file export
+[string]$a= @'
+    <style>
+    BODY {font-family:Verdana;
+           font-size:8pt; 
+           background: Black;}
+    TD{color:Black;}
+    h2 {color:white;
+        text-align:center;
+        font-size:18pt;}
+    TH {color:PaleGoldenrod;
+         background-color: DarkSlateGray;}
+    TR:Nth-Child(even) {Background-Color: Gainsboro;}
+    TR:Nth-Child(odd) {Background-Color: Silver;}
+    </style>
+'@
+
+
+#Converts each dataset to html, and exports to seperate files
+$output| ConvertTo-Html -Head $a | Out-File C:\TEMP\ClusterReport.htm -width 400
+$DataStoreGroup | ConvertTo-Html -Head $a | Out-File C:\TEMP\DatastoreReport.htm -width 400 | sort-object -Property Cluster -Descending
+
+
+#Deletes the existing combined file, otherwise it will append the new data to the old file due to -append
+$testpath = test-path C:\TEMP\OverviewReport.htm
+if ($testpath = $True){
+    Remove-Item C:\TEMP\OverviewReport.htm
+}
+
+#Combines the two datasets into one and exports it
+Get-Content "C:\TEMP\ClusterReport.htm", "C:\TEMP\DatastoreReport.htm" | Out-File -Append C:\TEMP\OverviewReport.htm
+
+Write-Host "Done! Exported to: C:\TEMP\OverviewReport.htm" -ForegroundColor Green
+Write-Host "Opening file..." -ForegroundColor Green
+C:\TEMP\OverviewReport.htm
