@@ -1,4 +1,4 @@
-    DESCRIPTION
+<#    DESCRIPTION
     This script was created to collect information from vSphere datastores and clusters, required for compliance checks and audits
     Functions:
         1. Collecs information from clusters (Overall data)

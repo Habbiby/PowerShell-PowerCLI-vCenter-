@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "PowerShell-Private",
+			"path": "../../PowerShell-Private/PowerShell-Private"
+		}
+	],
+	"settings": {}
+}
